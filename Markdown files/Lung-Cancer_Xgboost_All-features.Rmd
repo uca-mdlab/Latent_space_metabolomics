@@ -1,0 +1,305 @@
+---
+title: "Lung Cancer: Run Xgboost classifier with all features"
+author: "Evariste Njomgue"
+date: "2022-12-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Install libraries
+```{r eval=FALSE, include=FALSE}
+install.packages("xgboost")
+```
+
+
+
+# Load libraries
+```{r}
+library(xgboost)
+library(ggplot2)
+library(GGally)
+library(pROC)
+library(caret)
+library(PRROC)
+```
+
+# Load data
+```{r}
+data = read.csv("LUNG.txt", sep = ";")
+t_data = t(data)
+colnames(t_data) <- data[, 1]
+lung_data = t_data[-c(1), ]
+# Remove row names
+rownames(lung_data) <- NULL
+dim(lung_data)
+```
+
+Convert to numeric
+```{r}
+lung_data <- apply(lung_data, 2, function(x) as.numeric(x))
+typeof(lung_data[, 3])
+```
+
+# Have a look on data
+```{r}
+ggplot(data=as.data.frame(lung_data), aes(x=factor(lung_data[,1]))) +
+  geom_bar(stat="count", fill="steelblue")
+```
+
+# 
+```{r}
+ggpairs(as.data.frame(lung_data), columns = 12:18, ggplot2::aes(colour=as.character(lung_data[, 1]))) + theme_bw()
+```
+
+
+Transform target from 1/2 to 0/1
+```{r}
+# Case: 2 >> 1 | Control: 1 >> 0
+if (sum(lung_data[, 1] == 0) == 0) lung_data[, 1] = lung_data[, 1] - 1
+# Look at first 5 rows
+lung_data[1:5, 1]
+```
+
+# Save data
+```{r}
+# Save the file
+write.csv(lung_data, file = "LUNG_T.bin.csv", fileEncoding = "UTF-8", row.names = FALSE)
+```
+
+
+
+# Have a look on data
+```{r}
+str(lung_data[, 1:3])
+```
+
+# Split data in train, validation and test
+```{r}
+# 70 | 10 | 20
+set.seed(10)
+N = nrow(lung_data)
+train_ratio = 0.7
+indices= sample(1:N, train_ratio*N)
+train_data= lung_data[indices,]
+rest_data = lung_data[-indices,]
+test_ratio = 2/3
+N_rest = NROW(rest_data)
+indices= sample(1:N_rest, test_ratio*N_rest)
+test_data= rest_data[indices,]
+valid_data= rest_data[-indices,]
+#
+dim(train_data)
+dim(valid_data)
+dim(test_data)
+```
+
+Put data in xgb.DMatrix
+```{r}
+dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+dvalid <- xgb.DMatrix(data = valid_data[, -c(1)], label = valid_data[, 1])
+dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+#Using watchlist
+watchlist <- list(train = dtrain, test = dvalid)
+```
+
+Early stop
+```{r}
+early.stop = cb.early.stop(stopping_rounds=5, maximize = FALSE, metric_name = "error", verbose = TRUE)
+
+```
+
+
+# Classification: Xgboost with early stopping
+metric: 
+```{r}
+bst <- xgb.train(data = dtrain, max.depth = 4, watchlist = watchlist, eta = 1, nthread = 2, nrounds = 30, objective = "binary:logistic", early_stopping_rounds=10)
+```
+
+Look at prediction on validation set
+```{r}
+pred_proba_test <- predict(bst, dtest)
+```
+
+```{r}
+pred_test = as.integer(pred_proba_test > 0.5)
+# Accuracy
+mean(pred_test == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test))
+print(confusion_mat)
+```
+
+Roc curve
+```{r}
+res.roc <- roc(test_data[, 1], pred_proba_test)
+plot.roc(res.roc, print.auc = TRUE)
+```
+
+# check which features are the most important.
+```{r}
+print("Most important features (look at column Gain):")
+imp_matrix <- xgb.importance(feature_names = colnames(train_data[,-c(1)]), model = bst)
+print(imp_matrix)
+```
+
+# Feature importance bar plot by gain
+```{r}
+print("Feature importance Plot : ")
+print(xgb.plot.importance(importance_matrix = imp_matrix))
+```
+
+#  Tuning hyper-parameters: using XGBoost in caret Library
+
+#### Here we use 10-fold cross-validation, repeating twice, and using random search for tuning hyper-parameters.
+```{r}
+set.seed(2)
+start_time <- Sys.time()
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+# train a xgbTree model using caret::train
+model <- train(factor(Label)~., data = train_data, method = "xgbTree", trControl = fitControl)
+end_time <- Sys.time()
+print(paste("Hyper-parameters tuning - computing time: ", round(end_time-start_time, 4), " min(s)"))
+```
+
+Predict
+```{r}
+pred.test.tune <- predict(model, test_data)
+```
+
+Model parameters
+```{r}
+#
+#summary(model)
+
+```
+
+```{r}
+model$bestTune
+```
+
+
+Accuracy
+```{r}
+# Accuracy
+mean(pred.test.tune == test_data[, 1])
+```
+
+```{r}
+confusion.mat.tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred.test.tune))
+print(confusion.mat.tune)
+```
+
+#### Using tune hyper-parameters to train the model with monitoring
+
+```{r}
+bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], watchlist = watchlist, eta = model$bestTune[1, "eta"], gamma = model$bestTune[1, "gamma"], colsample_bytree = model$bestTune[1, "colsample_bytree"], min_child_weight = model$bestTune[1, "min_child_weight"], subsample = model$bestTune[1, "subsample"], nthread = 2, nrounds = model$bestTune[1, "nrounds"]+100, objective = "binary:logistic", early_stopping_rounds=50)
+```
+
+Hyper-params: Look at prediction on validation set
+```{r}
+pred_proba_test_tune <- predict(bst_tune, dtest)
+```
+
+```{r}
+pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+# Accuracy
+mean(pred_test_tune == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat_tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test_tune))
+print(confusion_mat_tune)
+```
+
+Roc curve tune
+```{r}
+res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+plot.roc(res.roc_tune, print.auc = TRUE)
+```
+
+# Look at features importance
+```{r}
+print("Most important features (look at column Gain):")
+imp_matrix <- xgb.importance(feature_names = colnames(train_data[,-c(1)]), model = bst_tune)
+print(imp_matrix)
+print("Feature importance Plot : ")
+xgb.plot.importance(importance_matrix = imp_matrix, rel_to_first = TRUE, xlab = "Relative importance", top_n=18, main="XgBoost all features - Top 18 features importance")
+```
+
+
+
+
+# Compute confidence interval: for performance metrics
+```{r}
+#Set the same seed
+set.seed(2023)
+#
+B.iter = 1000
+B.accuracy = rep(0, 1)
+B.auc = rep(0, 1)
+
+#
+N = nrow(lung_data)
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+
+# Run bootstrap
+start_time <- Sys.time()
+for (i in 1:B.iter){
+  # Sample with replacement
+  
+  # Split Train/Test
+  train_ratio = 0.8
+  indices= sample(1:N, train_ratio*N, replace = TRUE)
+  train_data= lung_data[indices,]
+  test_data= lung_data[-indices,]
+  #
+  dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+  dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+  #Using watchlist
+  watchlist <- list(train = dtrain, test = dtest)
+  
+  # Train model and compute performance metrics
+  #model <- train(factor(Label)~., data = train_data, method = "xgbTree", trControl = fitControl)
+  # Using the best hyperparameters
+  bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], 
+                        watchlist = watchlist, eta = model$bestTune[1, "eta"], 
+                        gamma = model$bestTune[1, "gamma"], 
+                        colsample_bytree = model$bestTune[1, "colsample_bytree"], 
+                        min_child_weight = model$bestTune[1, "min_child_weight"], 
+                        subsample = model$bestTune[1, "subsample"], nthread = 2, 
+                        nrounds = model$bestTune[1, "nrounds"]+100, 
+                        objective = "binary:logistic", early_stopping_rounds=50, verbose = FALSE)
+  
+  # Compute and Save the bootstrap statictics
+  pred_proba_test_tune <- predict(bst_tune, dtest)
+  pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+  # Accuracy
+  B.accuracy[i] = mean(pred_test_tune == test_data[, 1])
+  # AUC
+  res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+  B.auc[i] = auc(res.roc_tune)
+}
+end_time <- Sys.time()
+end_time-start_time
+paste("CI Bootstrap - computing time: ", end_time-start_time)
+
+```
+
+```{r}
+paste("Accuracy 95% CI: ", quantile(B.accuracy, probs = c(0.025, 0.975)))
+paste("AUC 95% CI: ", quantile(B.auc, probs = c(0.025, 0.975)))
+```
+
+
+```{r}
+hist(B.accuracy)
+hist(B.auc)
+```
+

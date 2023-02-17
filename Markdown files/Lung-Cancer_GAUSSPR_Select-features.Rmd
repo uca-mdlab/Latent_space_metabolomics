@@ -1,0 +1,178 @@
+---
+title: "Lung Cancer: Gaussian processes (GPLVM) with 202 selected features by distribution compraison"
+author: "Evariste Njomgue"
+date: "2023-01-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Install libraries
+```{r eval=FALSE, include=FALSE}
+
+```
+
+
+
+# Load libraries
+```{r}
+library(kernlab)
+library(ggplot2)
+library(GGally)
+library(pROC)
+library(caret)
+library(PRROC)
+```
+
+# Load data: Input data sub_feat_lung_data compute by Compare_Distribution_Both_population_Pos
+```{r}
+dim(sub_feat_lung_data)
+```
+
+
+# Have a look on data
+```{r}
+ggplot(data=as.data.frame(sub_feat_lung_data), aes(x=factor(sub_feat_lung_data[,1]))) +
+  geom_bar(stat="count", fill="steelblue")
+```
+
+# 
+```{r}
+ggpairs(as.data.frame(sub_feat_lung_data), columns = 12:18, ggplot2::aes(colour=as.character(sub_feat_lung_data[, 1]))) + theme_bw()
+```
+
+
+Transform target from 1/2 to 0/1
+```{r}
+# Case: 2 >> 1 | Control: 1 >> 0
+if (sum(sub_feat_lung_data[, 1] == 0) == 0) sub_feat_lung_data[, 1] = sub_feat_lung_data[, 1] - 1
+# Look at first 5 rows
+sub_feat_lung_data[1:5, 1]
+```
+
+
+# Have a look on data
+```{r}
+str(sub_feat_lung_data[, 1:3])
+```
+
+# Split data in train and test
+```{r}
+# 80 | 20
+set.seed(10)
+N = nrow(sub_feat_lung_data)
+train_ratio = 0.8
+indices= sample(1:N, train_ratio*N)
+train_data= sub_feat_lung_data[indices,]
+test_data= sub_feat_lung_data[-indices,]
+#
+dim(train_data)
+dim(test_data)
+```
+
+#Gaussian process on the training dataset
+```{r}
+# Fit the model
+gplvm.select <- gausspr(x=train_data[,-1], y=factor(train_data[,1]), type="classification", scaled=TRUE, kernel="rbfdot", kpar="automatic")
+```
+
+#Have a look on the model
+```{r}
+gplvm.select
+```
+
+Model parameters
+```{r}
+typeof(gplvm.select@alpha)
+```
+
+
+#the results on the test dataset
+```{r}
+pred_test <- predict(gplvm.select, test_data[,-1])
+# Accuracy
+mean(pred_test == test_data[, 1])
+```
+
+
+Confusion matrix
+```{r}
+confusion_mat = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test))
+print(confusion_mat)
+```
+
+#
+```{r}
+posterior <- predict(gplvm.select, test_data[,-1], type="probabilities")
+posterior[1:5,]
+```
+
+```{r}
+posterior[1:5,]
+```
+
+
+
+Roc curve 
+```{r}
+##the second col. contains the probabilities for the case category
+res.roc_tune <- roc(test_data[, 1], posterior[,2])
+plot.roc(res.roc_tune, print.auc = TRUE)
+```
+
+# Compute confidence interval: for performance metrics
+```{r}
+#Set the same seed
+set.seed(2023)
+#
+B.iter = 1000
+B.accuracy = rep(0, 1)
+B.auc = rep(0, 1)
+
+#
+N = nrow(sub_feat_lung_data)
+
+# Run bootstrap
+start_time <- Sys.time()
+for (i in 1:B.iter){
+  # Sample with replacement
+  
+  # Split Train/Test
+  train_ratio = 0.8
+  indices= sample(1:N, train_ratio*N, replace = TRUE)
+  train_data= sub_feat_lung_data[indices,]
+  test_data= sub_feat_lung_data[-indices,]
+  
+  # Train model and compute performance metrics
+  gplvm.select <- gausspr(x=train_data[,-1], y=factor(train_data[,1]),
+                          type="classification", scaled=TRUE, kernel="rbfdot",
+                          kpar="automatic")
+  
+  
+  # Compute and Save the bootstrap statictics
+  pred_test <- predict(gplvm.select, test_data[,-1])
+  # Accuracy
+  B.accuracy[i] = mean(pred_test == test_data[, 1])
+  # AUC
+  posterior <- predict(gplvm.select, test_data[,-1], type="probabilities")
+  res.roc_tune <- roc(test_data[, 1], posterior[,1])
+  B.auc[i] = auc(res.roc_tune)
+}
+end_time <- Sys.time()
+end_time-start_time
+paste("CI Bootstrap - computing time: ", end_time-start_time)
+```
+
+```{r}
+# replacement TRUE
+hist(B.accuracy)
+hist(B.auc)
+```
+
+```{r}
+paste("Accuracy 95% CI: ", quantile(B.accuracy, probs = c(0.025, 0.975)))
+paste("AUC 95% CI: ", quantile(B.auc, probs = c(0.025, 0.975)))
+```
+

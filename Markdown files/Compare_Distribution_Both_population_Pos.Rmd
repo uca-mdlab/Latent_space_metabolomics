@@ -1,0 +1,365 @@
+---
+title: "Compare distribution of both population for each feature - Pos file"
+author: "Evariste"
+date: "2022-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Load libraries
+```{r}
+library(stringr)
+library(dgof)
+library(PRROC)
+```
+
+
+Input data: computed by E_Factor_Analysis.Rmd
+```{r echo=TRUE}
+dim(lung_data)
+```
+
+
+KS test: Compare distribution of both populations (case vs control) for each features (metabolites)
+```{r warning=FALSE}
+Nb_features = NCOL(lung_data)
+selected_features = c()
+meta_pValues = rep(NA, 2)
+idx_feat = 1
+#
+target = "Label"
+#
+for (meta in 2:Nb_features){
+  metabolite_data = lung_data[, meta]
+  case_data = metabolite_data[lung_data[,target] == 1]
+  control_data = metabolite_data[lung_data[,target] == 0]
+  #Run KS test
+  ks_result = ks.test(case_data, control_data, exact=FALSE)
+  if (ks_result$p.value <= 0.05){ # keep the 200 significant p-value
+    # Sufficient evidence to say that the two sample datasets do not come from the same distribution: so we keep the metabolite
+    selected_features = c(selected_features, meta)
+  }
+  # Store the p.values
+  meta_pValues[meta-1] = ks_result$p.value
+}
+```
+
+```{r}
+length(selected_features)
+```
+
+
+```{r}
+sum(meta_pValues <= 0.0000006)
+```
+
+```{r}
+# +1 to take into account the Label column
+kept_feat = which(meta_pValues <= 0.0000006) + 1
+length(kept_feat)
+cat("\n")
+kept_feat
+```
+
+Have a look on 202 kept features: different distribution
+```{r}
+set.seed(1)
+meta = sample(kept_feat, 1) # Pick a feature
+metabolite_data = lung_data[, meta]
+case_data = metabolite_data[lung_data[,target] == 1]
+control_data = metabolite_data[lung_data[,target] == 0]
+plot(density(case_data), col="red") 
+lines(density(control_data), col="blue")
+```
+Example same distribution
+```{r}
+metabolite_data = lung_data[, 5]
+case_data = metabolite_data[lung_data[,target] == 1]
+control_data = metabolite_data[lung_data[,target] == 0]
+plot(density(case_data), col="red") 
+lines(density(control_data), col="blue")
+```
+
+Subset of feature selected
+```{r}
+sub_feat_lung_data = cbind(Label=lung_data[,1], lung_data[, kept_feat])
+dim(sub_feat_lung_data)
+```
+
+```{r eval=FALSE, include=FALSE}
+sub_feat_lung_data = lung_data[, c(1, kept_feat)]
+```
+
+SAE: Top 5 features on the LUNG dataset
+```{r}
+c("MZ 264.12", "MZ 308.09", "MZ 126.90", "MZ 232.03", "MZ 332.09") %in% substr(colnames(sub_feat_lung_data), 1, 9)
+```
+
+
+# Save selected features
+```{r}
+# Save the file
+write.csv(sub_feat_lung_data, file = "LUNG_T.Feat.Select.csv", fileEncoding = "UTF-8", row.names = FALSE)
+```
+
+
+# Split data in train, validation and test
+```{r}
+# 70 | 10 | 20
+set.seed(90)
+N = nrow(sub_feat_lung_data)
+train_ratio = 0.7
+indices= sample(1:N, train_ratio*N)
+train_data= sub_feat_lung_data[indices,]
+rest_data = sub_feat_lung_data[-indices,]
+test_ratio = 2/3
+N_rest = NROW(rest_data)
+indices= sample(1:N_rest, test_ratio*N_rest)
+test_data= rest_data[indices,]
+valid_data= rest_data[-indices,]
+#
+dim(train_data)
+dim(valid_data)
+dim(test_data)
+```
+
+Put data in xgb.DMatrix
+```{r}
+dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+dvalid <- xgb.DMatrix(data = valid_data[, -c(1)], label = valid_data[, 1])
+dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+#Using watchlist
+watchlist <- list(train = dtrain, test = dvalid)
+```
+
+Early stop
+```{r}
+early.stop = cb.early.stop(stopping_rounds=5, maximize = FALSE, metric_name = "error", verbose = TRUE)
+
+```
+
+# Classification: Xgboost with early stopping
+metric: 
+```{r}
+bst <- xgb.train(data = dtrain, max.depth = 4, watchlist = watchlist, eta = 1, nthread = 2, nrounds = 30, objective = "binary:logistic", early_stopping_rounds=10)
+```
+
+Look at prediction on validation set
+```{r}
+pred_proba_test <- predict(bst, dtest)
+```
+
+```{r}
+pred_test = as.integer(pred_proba_test > 0.5)
+# Accuracy
+mean(pred_test == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test))
+print(confusion_mat)
+```
+
+Roc curve
+```{r}
+res.roc <- roc(test_data[, 1], pred_proba_test)
+plot.roc(res.roc, print.auc = TRUE)
+```
+
+# check which features are the most important.
+```{r}
+print("Most important features (look at column Gain):")
+imp_matrix <- xgb.importance(feature_names = colnames(train_data[,-c(1)]), model = bst)
+print(imp_matrix)
+```
+
+# Feature importance bar plot by gain
+```{r}
+print("Feature importance Plot : ")
+print(xgb.plot.importance(importance_matrix = imp_matrix))
+```
+
+#  Tuning hyper-parameters: using XGBoost in caret Library
+
+#### Here we use 10-fold cross-validation, repeating twice, and using random search for tuning hyper-parameters.
+```{r}
+set.seed(0)
+start_time <- Sys.time()
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+# train a xgbTree model using caret::train
+model <- train(factor(Label)~., data = train_data, method = "xgbTree", trControl = fitControl)
+end_time <- Sys.time()
+print("Hyper-parameters tuning - computing time:")
+end_time-start_time
+```
+
+Predict
+```{r}
+pred.test.tune <- predict(model, test_data)
+```
+
+Model parameters
+```{r}
+#
+names(model)
+
+```
+
+```{r}
+model$bestTune
+```
+
+```{r}
+model$finalModel
+```
+
+
+Accuracy
+```{r}
+# Accuracy
+mean(pred.test.tune == test_data[, 1])
+```
+
+```{r}
+confusion.mat.tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred.test.tune))
+print(confusion.mat.tune)
+```
+
+#### Using tune hyper-parameters to train the model with monitoring
+
+```{r}
+bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], watchlist = watchlist, eta = model$bestTune[1, "eta"], gamma = model$bestTune[1, "gamma"], colsample_bytree = model$bestTune[1, "colsample_bytree"], min_child_weight = model$bestTune[1, "min_child_weight"], subsample = model$bestTune[1, "subsample"], nthread = 2, nrounds = model$bestTune[1, "nrounds"]+100, objective = "binary:logistic", early_stopping_rounds=50)
+```
+
+Hyper-params: Look at prediction on validation set
+```{r}
+pred_proba_test_tune <- predict(bst_tune, dtest)
+```
+
+```{r}
+pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+# Accuracy
+mean(pred_test_tune == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat_tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test_tune))
+print(confusion_mat_tune)
+```
+
+Roc curve tune
+```{r}
+res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+plot.roc(res.roc_tune, print.auc = TRUE)
+```
+
+# Look at features importance
+```{r}
+print("Most important features (look at column Gain):")
+imp_matrix <- xgb.importance(feature_names = colnames(train_data[,-c(1)]), model = bst_tune)
+print(imp_matrix)
+print("Feature importance Plot : ")
+xgb.plot.importance(importance_matrix = imp_matrix, rel_to_first = TRUE, xlab = "Relative importance", top_n=18, main="XgBoost pre-selected features - Top 18 features importance")
+```
+
+
+Check vs preselected features - Top 18
+```{r}
+c("MZ 264.12", "MZ 358.11", "mz 441.16", "MZ 247.09", "MZ 227.05", "mz 122.02",
+  "MZ 335.06", "MZ 430.06", "mz 126.90", "mz 100.00", "mz 230.05", "MZ 269.12",
+  "MZ 486.25", "MZ 288.02", "MZ 454.18", "MZ 240.02", "MZ 319.16", "mz 627.37") %in% substr(colnames(sub_feat_lung_data), 1, 9)
+```
+
+```{r}
+colnames(sub_feat_lung_data)
+```
+
+
+# Have a look on boxplot
+```{r}
+feat_col_1 = which(substr(colnames(lung_data), 1, 10) == "MZ 264.121")
+feat_col_2 = which(substr(colnames(lung_data), 1, 10) == "mz 308.098")
+feat_col_2
+boxplot(lung_data[, c(feat_col_1, feat_col_2)] ~ lung_data[, 1], main="Boxplot of features MZ 264.121 and MZ 308.098")
+```
+
+
+```{r}
+boxplot(lung_data[, feat_col_1] ~ lung_data[, 1], main="Boxplot of features MZ 264.121")
+```
+
+
+# Compute confidence interval: for performance metrics
+```{r eval=FALSE, include=FALSE}
+#Set the same seed
+set.seed(2023)
+#
+B.iter = 1000
+B.accuracy = rep(0, 1)
+B.auc = rep(0, 1)
+
+#
+N = nrow(sub_feat_lung_data)
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+
+# Run bootstrap
+start_time <- Sys.time()
+for (i in 1:B.iter){
+  # Sample with replacement
+  
+  # Split Train/Test
+  train_ratio = 0.8
+  indices= sample(1:N, train_ratio*N, replace = TRUE)
+  train_data= sub_feat_lung_data[indices,]
+  test_data= sub_feat_lung_data[-indices,]
+  #
+  dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+  dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+  #Using watchlist
+  watchlist <- list(train = dtrain, test = dtest)
+  
+  # Train model and compute performance metrics
+  #model <- train(factor(Label)~., data = train_data, method = "xgbTree", trControl = fitControl)
+  # Using the best hyperparameters
+  bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], 
+                        watchlist = watchlist, eta = model$bestTune[1, "eta"], 
+                        gamma = model$bestTune[1, "gamma"], 
+                        colsample_bytree = model$bestTune[1, "colsample_bytree"], 
+                        min_child_weight = model$bestTune[1, "min_child_weight"], 
+                        subsample = model$bestTune[1, "subsample"], nthread = 2, 
+                        nrounds = model$bestTune[1, "nrounds"]+100, 
+                        objective = "binary:logistic", early_stopping_rounds=50, verbose = FALSE)
+  
+  # Compute and Save the bootstrap statictics
+  pred_proba_test_tune <- predict(bst_tune, dtest)
+  pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+  # Accuracy
+  B.accuracy[i] = mean(pred_test_tune == test_data[, 1])
+  # AUC
+  res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+  B.auc[i] = auc(res.roc_tune)
+}
+end_time <- Sys.time()
+end_time-start_time
+paste("CI Bootstrap - computing time: ", end_time-start_time)
+```
+
+
+```{r echo=TRUE}
+# replacement TRUE
+hist(B.accuracy)
+hist(B.auc)
+```
+
+
+```{r echo=TRUE}
+paste("Accuracy 95% CI: ", quantile(B.accuracy, probs = c(0.025, 0.975)))
+paste("AUC 95% CI: ", quantile(B.auc, probs = c(0.025, 0.975)))
+```
+

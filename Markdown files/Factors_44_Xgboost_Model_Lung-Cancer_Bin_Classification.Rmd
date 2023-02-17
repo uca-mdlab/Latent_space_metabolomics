@@ -1,0 +1,346 @@
+---
+title: "Lung cancer: Model Binary Classification - Xgboost classifier - 44 Factors"
+author: "Evariste"
+date: "2022-12-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Library
+```{r echo=TRUE}
+library(xgboost)
+library(stringr)
+library(ggplot2)
+library(GGally)
+library(caret)
+library(pROC)
+library(EFAtools)
+library(psych)
+library(PRROC)
+```
+
+
+# Input data sub_feat_lung_data compute by Compare_Distribution_Both_population_Pos
+```{r}
+dim(sub_feat_lung_data)
+```
+
+
+# Compute factors - Varimax (most common method used)
+```{r}
+res_efa_44 = EFA(sub_feat_lung_data[,-1], n_factors = 44, rotation = "varimax", type = "EFAtools")
+```
+
+
+# Classification with factors: target variable gender
+
+Get factor scores
+```{r}
+fac_scores <- FACTOR_SCORES(sub_feat_lung_data[,-1], f = res_efa_44)
+data_pos_scores <- fac_scores$scores
+dim(data_pos_scores)
+```
+
+Add target variable
+```{r}
+target = "Label"
+data_pos_fa_target = cbind(Label=lung_data[,1], data_pos_scores)
+dim(data_pos_fa_target)
+
+```
+
+### Have a look on data
+```{r}
+ggpairs(as.data.frame(data_pos_fa_target), columns = 5:10, ggplot2::aes(colour=factor(data_pos_fa_target[, 1]))) + theme_bw()
+```
+
+
+# Split data in train, validation and test
+```{r}
+# 70 | 10 | 20
+set.seed(30)
+N = nrow(data_pos_fa_target)
+train_ratio = 0.7
+indices= sample(1:N, train_ratio*N)
+train_data= data_pos_fa_target[indices,]
+rest_data = data_pos_fa_target[-indices,]
+test_ratio = 2/3
+N_rest = NROW(rest_data)
+indices= sample(1:N_rest, test_ratio*N_rest)
+test_data= rest_data[indices,]
+valid_data= rest_data[-indices,]
+#
+dim(train_data)
+dim(valid_data)
+dim(test_data)
+```
+
+Put data in xgb.DMatrix
+```{r}
+dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+dvalid <- xgb.DMatrix(data = valid_data[, -c(1)], label = valid_data[, 1])
+dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+#Using watchlist
+watchlist <- list(train = dtrain, test = dvalid)
+```
+
+Early stop
+```{r}
+early.stop = cb.early.stop(stopping_rounds=5, maximize = FALSE, metric_name = "error", verbose = TRUE)
+
+```
+
+# Classification: Xgboost with early stopping
+metric: 
+```{r}
+bst <- xgb.train(data = dtrain, max.depth = 4, watchlist = watchlist, eta = 1, nthread = 2, nrounds = 30, objective = "binary:logistic", early_stopping_rounds=10)
+```
+
+Look at prediction on validation set
+```{r}
+pred_proba_test <- predict(bst, dtest)
+```
+
+```{r}
+pred_test = as.integer(pred_proba_test > 0.5)
+# Accuracy
+mean(pred_test == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test))
+print(confusion_mat)
+```
+
+Roc curve
+```{r}
+res.roc <- roc(test_data[, 1], pred_proba_test)
+plot.roc(res.roc, print.auc = TRUE)
+```
+
+# check which features are the most important.
+```{r}
+print("Most important features (look at column Gain):")
+imp_matrix <- xgb.importance(feature_names = colnames(train_data[,-c(1)]), model = bst)
+print(imp_matrix)
+```
+
+# Feature importance bar plot by gain
+```{r}
+print("Feature importance Plot : ")
+print(xgb.plot.importance(importance_matrix = imp_matrix))
+```
+
+#  Tuning hyper-parameters: using XGBoost in caret Library
+
+#### Here we use 10-fold cross-validation, repeating twice, and using random search for tuning hyper-parameters.
+```{r}
+set.seed(0)
+start_time <- Sys.time()
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+# train a xgbTree model using caret::train
+model <- train(factor(Label)~., data = train_data, method = "xgbTree", trControl = fitControl)
+end_time <- Sys.time()
+print(paste("Hyper-parameters tuning - computing time: ", round(end_time-start_time, 4), " min(s)"))
+```
+
+Predict
+```{r}
+pred.test.tune <- predict(model, test_data)
+```
+
+Model parameters
+```{r}
+#
+names(model)
+
+```
+
+```{r}
+model$bestTune
+```
+
+```{r}
+model$finalModel
+```
+
+
+Accuracy
+```{r}
+# Accuracy
+mean(pred.test.tune == test_data[, 1])
+```
+
+```{r}
+confusion.mat.tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred.test.tune))
+print(confusion.mat.tune)
+```
+
+#### Using tune hyper-parameters to train the model with monitoring
+
+```{r}
+set.seed(17)
+bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], watchlist = watchlist, eta = model$bestTune[1, "eta"], gamma = model$bestTune[1, "gamma"], colsample_bytree = model$bestTune[1, "colsample_bytree"], min_child_weight = model$bestTune[1, "min_child_weight"], subsample = model$bestTune[1, "subsample"], nthread = 2, nrounds = model$bestTune[1, "nrounds"]+100, objective = "binary:logistic", early_stopping_rounds=50)
+```
+
+Hyper-params: Look at prediction on validation set
+```{r}
+pred_proba_test_tune <- predict(bst_tune, dtest)
+```
+
+```{r}
+pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+# Accuracy
+mean(pred_test_tune == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat_tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test_tune))
+print(confusion_mat_tune)
+```
+
+Roc curve tune
+```{r}
+res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+plot.roc(res.roc_tune, print.auc = TRUE)
+```
+
+# Look at features importance
+```{r}
+print("Most important features (look at column Gain):")
+imp_matrix <- xgb.importance(feature_names = colnames(train_data[,-c(1)]), model = bst_tune)
+print(imp_matrix)
+print("Feature importance Plot : ")
+xgb.plot.importance(importance_matrix = imp_matrix, rel_to_first = TRUE, xlab = "Relative importance", top_n=18, main="Factor Analysis: 44 factors - Top 18 features importance")
+```
+
+
+```{r}
+?xgb.plot.importance
+```
+
+
+# Diagram factor
+```{r}
+loads = res_efa_44$rot_loadings
+
+fa.diagram(loads[,2:3])
+```
+
+```{r}
+which(substr(row.names(loads), 1, 9) == "MZ 264.12")
+which(colnames(loads) == "F6")
+```
+
+# Analyze top 3 of each factors
+```{r}
+Top_1 = which(colnames(loads) == "F21")
+paste("F21: ", sum(abs(loads[,Top_1]) > 0.766))
+(loads[,Top_1])[abs(loads[,Top_1]) > 0.766]
+#
+Top_2 = which(colnames(loads) == "F3")
+paste("F3: ", sum(abs(loads[,Top_2]) > 0.65))
+(loads[,Top_2])[abs(loads[,Top_2]) > 0.65]
+#
+Top_3 = which(colnames(loads) == "F6")
+paste("F6: ", sum(abs(loads[,Top_3]) > 0.89))
+(loads[,Top_3])[abs(loads[,Top_3]) > 0.89]
+#
+Top_4 = which(colnames(loads) == "F14")
+paste("F14: ", sum(abs(loads[,Top_4]) > 0.5))
+(loads[,Top_4])[abs(loads[,Top_4]) > 0.5]
+#
+Top_5 = which(colnames(loads) == "F1")
+paste("F1: ", sum(abs(loads[,Top_5]) > 0.918))
+(loads[,Top_5])[abs(loads[,Top_5]) > 0.918]
+```
+
+# Where is feature:
+```{r}
+paste("MZ 264.12")
+Pos_MZ_264.12 = which(substr(row.names(loads), 1, 9) == "MZ 264.12")
+which(loads[Pos_MZ_264.12,] >= 0.5)
+loads[Pos_MZ_264.12, which(loads[Pos_MZ_264.12,] >= 0.5)]
+#
+paste("MZ 332.09")
+Pos_MZ_332.09 = which(substr(row.names(loads), 1, 9) == "MZ 332.09")
+which(loads[Pos_MZ_332.09,] >= 0.4)
+loads[Pos_MZ_332.09, which(loads[Pos_MZ_332.09,] >= 0.4)]
+```
+
+
+
+
+# Compute confidence interval: for performance metrics
+```{r}
+#Set the same seed
+set.seed(2023)
+#
+B.iter = 1000
+B.accuracy = rep(0, 1)
+B.auc = rep(0, 1)
+
+#
+N = nrow(data_pos_fa_target)
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+
+# Run bootstrap
+start_time <- Sys.time()
+for (i in 1:B.iter){
+  # Sample with replacement
+  
+  # Split Train/Test
+  train_ratio = 0.8
+  indices= sample(1:N, train_ratio*N, replace = TRUE)
+  train_data= data_pos_fa_target[indices,]
+  test_data= data_pos_fa_target[-indices,]
+  #
+  dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+  dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+  #Using watchlist
+  watchlist <- list(train = dtrain, test = dtest)
+  
+  # Train model and compute performance metrics
+  #model <- train(factor(Label)~., data = train_data, method = "xgbTree", trControl = fitControl)
+  # Using the best hyperparameters
+  bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], 
+                        watchlist = watchlist, eta = model$bestTune[1, "eta"], 
+                        gamma = model$bestTune[1, "gamma"], 
+                        colsample_bytree = model$bestTune[1, "colsample_bytree"], 
+                        min_child_weight = model$bestTune[1, "min_child_weight"], 
+                        subsample = model$bestTune[1, "subsample"], nthread = 2, 
+                        nrounds = model$bestTune[1, "nrounds"]+100, 
+                        objective = "binary:logistic", early_stopping_rounds=50, verbose = FALSE)
+  
+  # Compute and Save the bootstrap statictics
+  pred_proba_test_tune <- predict(bst_tune, dtest)
+  pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+  # Accuracy
+  B.accuracy[i] = mean(pred_test_tune == test_data[, 1])
+  # AUC
+  res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+  B.auc[i] = auc(res.roc_tune)
+}
+end_time <- Sys.time()
+end_time-start_time
+paste("CI Bootstrap - computing time: ", end_time-start_time)
+```
+
+```{r}
+# replacement TRUE
+hist(B.accuracy)
+hist(B.auc)
+```
+
+```{r}
+paste("Accuracy 95% CI: ", quantile(B.accuracy, probs = c(0.025, 0.975)))
+paste("AUC 95% CI: ", quantile(B.auc, probs = c(0.025, 0.975)))
+
+```
+

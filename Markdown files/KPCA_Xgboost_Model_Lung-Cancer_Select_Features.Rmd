@@ -1,0 +1,338 @@
+---
+title: "Lung cancer: Binary Classification with Kernel principal components analysis (KPCA) - Xgboost classifier"
+author: "Evariste"
+date: "2023-01-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Library
+```{r echo=TRUE}
+library(xgboost)
+library(kernlab)
+library(stringr)
+library(ggplot2)
+library(GGally)
+library(caret)
+library(pROC)
+library(PRROC)
+```
+
+
+# Applying KPCA using R function
+
+compute KPCA on data
+```{r}
+# rbfdot kernel
+#data_pos.kpca = kpca(x=as.matrix(sub_feat_lung_data[, -c(1)]),  kernel = "rbfdot", features=44, kpar=list(sigma=0.2), th=0.0001)
+
+# polydot kernel
+data_pos.kpca = kpca(x=as.matrix(sub_feat_lung_data[, -c(1)]),  kernel = "polydot", features=50, kpar=list(degree=3, scale=0.1, offset=1), th=0.0001)
+
+dim(sub_feat_lung_data)
+length(data_pos.kpca@eig)
+```
+
+Max and min eig
+```{r}
+max(data_pos.kpca@eig)
+min(data_pos.kpca@eig)
+```
+
+Look at KPCA components
+```{r}
+dim(data_pos.kpca@rotated)
+typeof(data_pos.kpca@rotated)
+```
+
+Add target variable
+```{r}
+target = "Label"
+data_pos_kpca_target = cbind(Label=lung_data[,1], data_pos.kpca@rotated)
+dim(data_pos_kpca_target)
+
+```
+
+Check balanced class or not
+```{r}
+ggplot(data=as.data.frame(data_pos_kpca_target), aes(x=factor(data_pos_kpca_target[,1]))) +
+  geom_bar(stat="count", fill="steelblue")
+#+   theme_bw() + theme(plot.margin = margin(0.1, 0.1, 0.2, 0.2, "cm"))
+```
+
+
+### Have a look on data
+```{r}
+ggpairs(as.data.frame(data_pos_kpca_target), columns = 12:18, ggplot2::aes(colour=factor(data_pos_kpca_target[, 1]))) + theme_bw() 
+```
+
+
+# Split data in train, validation and test
+```{r}
+# 70 | 10 | 20
+set.seed(20)
+N = nrow(data_pos_kpca_target)
+train_ratio = 0.7
+indices= sample(1:N, train_ratio*N)
+train_data= data_pos_kpca_target[indices,]
+rest_data = data_pos_kpca_target[-indices,]
+test_ratio = 2/3
+N_rest = NROW(rest_data)
+indices= sample(1:N_rest, test_ratio*N_rest)
+test_data= rest_data[indices,]
+valid_data= rest_data[-indices,]
+#
+dim(train_data)
+dim(valid_data)
+dim(test_data)
+```
+
+Put data in xgb.DMatrix
+```{r}
+dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+dvalid <- xgb.DMatrix(data = valid_data[, -c(1)], label = valid_data[, 1])
+dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+#Using watchlist
+watchlist <- list(train = dtrain, test = dvalid)
+```
+
+Early stop
+```{r}
+early.stop = cb.early.stop(stopping_rounds=5, maximize = FALSE, metric_name = "error", verbose = TRUE)
+
+```
+
+# Classification: Xgboost with early stopping
+metric: 
+```{r}
+bst <- xgb.train(data = dtrain, max.depth = 4, watchlist = watchlist, eta = 1, nthread = 2, nrounds = 30, objective = "binary:logistic", early_stopping_rounds=20)
+```
+
+Look at prediction on validation set
+```{r}
+pred_proba_test <- predict(bst, dtest)
+```
+
+```{r}
+pred_test = as.integer(pred_proba_test > 0.5)
+# Accuracy
+mean(pred_test == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test))
+print(confusion_mat)
+```
+
+Roc curve
+```{r}
+res.roc <- roc(test_data[, 1], pred_proba_test)
+plot.roc(res.roc, print.auc = TRUE)
+```
+
+# check which features are the most important.
+```{r}
+print("Most important features (look at column Gain):")
+imp_matrix <- xgb.importance(feature_names = colnames(train_data[,-c(1)]), model = bst)
+print(imp_matrix)
+```
+
+# Feature importance bar plot by gain
+```{r}
+print("Feature importance Plot : ")
+print(xgb.plot.importance(importance_matrix = imp_matrix))
+```
+
+#  Tuning hyper-parameters: using XGBoost in caret Library
+
+#### Here we use 10-fold cross-validation, repeating twice, and using random search for tuning hyper-parameters.
+```{r}
+set.seed(10)
+start_time <- Sys.time()
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+# train a xgbTree model using caret::train
+model <- train(factor(Label)~., data = as.data.frame(train_data), method = "xgbTree", trControl = fitControl)
+end_time <- Sys.time()
+print(paste("Hyper-parameters tuning - computing time: ", round(end_time-start_time, 4), " min(s)"))
+```
+
+Predict
+```{r}
+pred.test.tune <- predict(model, test_data)
+```
+
+Model parameters
+```{r}
+#
+names(model)
+
+```
+
+```{r}
+model$bestTune
+```
+
+```{r}
+model$finalModel
+```
+
+
+Accuracy
+```{r}
+# Accuracy
+mean(pred.test.tune == test_data[, 1])
+```
+
+```{r}
+confusion.mat.tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred.test.tune))
+print(confusion.mat.tune)
+```
+
+#### Using tune hyper-parameters to train the model with monitoring
+
+```{r}
+bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], watchlist = watchlist, eta = model$bestTune[1, "eta"], gamma = model$bestTune[1, "gamma"], colsample_bytree = model$bestTune[1, "colsample_bytree"], min_child_weight = model$bestTune[1, "min_child_weight"], subsample = model$bestTune[1, "subsample"], nthread = 2, nrounds = model$bestTune[1, "nrounds"]+100, objective = "binary:logistic", early_stopping_rounds=50)
+```
+
+Hyper-params: Look at prediction on validation set
+```{r}
+pred_proba_test_tune <- predict(bst_tune, dtest)
+```
+
+```{r}
+pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+# Accuracy
+mean(pred_test_tune == test_data[, 1])
+```
+
+Confusion matrix
+```{r}
+confusion_mat_tune = as.matrix(table(Actual_Values = test_data[, 1], Predicted_Values = pred_test_tune))
+print(confusion_mat_tune)
+```
+
+Roc curve tune
+```{r}
+res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+plot.roc(res.roc_tune, print.auc = TRUE)
+```
+
+```{r}
+
+```
+
+
+## Save latent space Test data with actuals and predictions
+```{r}
+# Add predictions
+test.data.pos.kpca.target.saved = data.frame(Predicted_Label = pred_test_tune, test_data)
+
+# Save the file
+write.csv(test.data.pos.kpca.target.saved, file = "LUNG_KPCA.csv", fileEncoding = "UTF-8")
+
+```
+
+
+## All data accuracy
+```{r}
+# Accuracy
+mean(test.data.pos.kpca.target.saved$Predicted_Label == test.data.pos.kpca.target.saved$Label)
+```
+
+
+## All data confusion matrix
+```{r}
+confusion_mat_tune = as.matrix(table(Actual_Values = test.data.pos.kpca.target.saved$Label, Predicted_Values = test.data.pos.kpca.target.saved$Predicted_Label))
+print(confusion_mat_tune)
+```
+
+
+# Compute confidence interval: for performance metrics
+```{r}
+#Set the same seed
+set.seed(2023)
+#
+B.iter = 1000
+B.accuracy = rep(0, 1)
+B.auc = rep(0, 1)
+
+#
+N = nrow(data_pos_kpca_target)
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 2, search = "random")
+
+# Run bootstrap
+start_time <- Sys.time()
+for (i in 1:B.iter){
+  # Sample with replacement
+  
+  # Split Train/Test
+  train_ratio = 0.8
+  indices= sample(1:N, train_ratio*N, replace = TRUE)
+  train_data= data_pos_kpca_target[indices,]
+  test_data= data_pos_kpca_target[-indices,]
+  #
+  dtrain <- xgb.DMatrix(data = train_data[,-c(1)], label = train_data[, 1])
+  dtest <- xgb.DMatrix(data = test_data[, -c(1)], label = test_data[, 1])
+  #Using watchlist
+  watchlist <- list(train = dtrain, test = dtest)
+  
+  # Train model and compute performance metrics
+  #model <- train(factor(Label)~., data = train_data, method = "xgbTree", trControl = fitControl)
+  # Using the best hyperparameters
+  bst_tune <- xgb.train(data = dtrain, max.depth = model$bestTune[1, "max_depth"], 
+                        watchlist = watchlist, eta = model$bestTune[1, "eta"], 
+                        gamma = model$bestTune[1, "gamma"], 
+                        colsample_bytree = model$bestTune[1, "colsample_bytree"], 
+                        min_child_weight = model$bestTune[1, "min_child_weight"], 
+                        subsample = model$bestTune[1, "subsample"], nthread = 2, 
+                        nrounds = model$bestTune[1, "nrounds"]+100, 
+                        objective = "binary:logistic", early_stopping_rounds=50, verbose = FALSE)
+  
+  # Compute and Save the bootstrap statictics
+  pred_proba_test_tune <- predict(bst_tune, dtest)
+  pred_test_tune = as.integer(pred_proba_test_tune > 0.5)
+  # Accuracy
+  B.accuracy[i] = mean(pred_test_tune == test_data[, 1])
+  # AUC
+  res.roc_tune <- roc(test_data[, 1], pred_proba_test_tune)
+  B.auc[i] = auc(res.roc_tune)
+  
+}
+end_time <- Sys.time()
+end_time-start_time
+paste("CI Bootstrap - computing time: ", end_time-start_time)
+```
+
+
+# 95% CI
+```{r}
+paste("Accuracy 95% CI: ", quantile(B.accuracy, probs = c(0.025, 0.975)))
+paste("AUC 95% CI: ", quantile(B.auc, probs = c(0.025, 0.975)))
+```
+
+
+# Histogramms
+```{r}
+# replacement TRUE
+hist(B.accuracy)
+hist(B.auc)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
