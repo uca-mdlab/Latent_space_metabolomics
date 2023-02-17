@@ -1,0 +1,157 @@
+---
+title: "Exploratory_Factor_Analysis: KS test used to keep the 202 features with most significant difference between both populations"
+author: "Evariste"
+date: "2022-12-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exploratory factor analysis on the dataset MTBLS28 - Non-invasive urinary metabolomic profiling identifies diagnostic and prognostic markers in lung cancer
+
+Load libraries
+```{r}
+library(psych)
+library(EFAtools)
+```
+
+Read data: computed by Compare_Distribution_Both_population_Pos
+```{r}
+dim(sub_feat_lung_data)
+```
+
+
+## Problem formulation: Explore factors that may exist in the dataset
+We search for latent pattern in the data which can classify properly on smoking status, gender, race or illness (pos/neg)
+
+### Step 1. Appropriateness of factor analysis: Check if it exists some correlations among variables
+
+#### Sample size
+Should be 4 or 5 times the variables.
+```{r}
+#We cannot use all variables as the dataset is small
+dim(sub_feat_lung_data[,-1]) #remove "sample name" column
+```
+Check there is no missing value
+```{r}
+sum(is.na(sub_feat_lung_data))
+```
+
+#### Kaiser-Mayer-Olkin (KMO) measure of sampling adequacy
+Expected value of KMO index should be greater than 0.7: smaller than 0.5 is unacceptable.
+```{r}
+
+```
+
+```{r}
+EFAtools::KMO(sub_feat_lung_data[,-1])
+```
+
+
+#### Bartlett's test of Spericity: examine the hypothesis that variables are uncorrelated in the population.
+If variables are uncorrelated this means FA is not appropriate (will not make sense)
+Expected value of r should be smaller than 0.05: means data does not produce an identity matrix
+```{r}
+EFAtools::BARTLETT(sub_feat_lung_data[,-1])
+```
+
+#### Communality: proportion of variance explained by the common factors.
+Small values indicate variables that do not fit well with the factor. Index smaller that 0.5 should be removed.
+Question: can be kept as a specific factor ?
+```{r}
+
+```
+
+
+### Step 2. Factoring technique
+Principal component method
+
+### Step 3. Decision according to the number of factors
+Expected number of factors: Cumulative factors explaining 60% - 70% of variance should be retained in the model
+```{r echo=TRUE}
+start_time <- Sys.time()
+N_FACTORS(sub_feat_lung_data[,-1], method = "ULS")
+end_time <- Sys.time()
+print(paste("N_FACTORS - computing time: ", round(end_time-start_time, 4), " min(s)"))
+```
+
+
+#### Percentage of variance criteria
+percentage of variance that can be attributed to each specific factor relative to the total variance in all the factors.
+Base on the concept of cumulative percentage of variance
+```{r}
+
+```
+
+
+#### Scree plot
+The eigen values represents the total variance explained by each factor
+The number of factors is equal to the number of eigen values greater than 1.
+Use the scree plot: plot eigenvalues and factor number and look at the elbow
+```{r}
+
+```
+
+
+### Step 4. Rotation factor (method)
+A rotation is required because the original factor model may be mathematically correct but may be difficult in terms of interpretation.
+If various factors have a high loading on the same variable, then interpretation will be extremly difficult.
+The main objective of rotation is to produce a relatively simple structure in which there may be a high factor loading on one factor and low factor loading on all others factors.
+
+#### Varimax (most common method used)
+Minimizes the correlation between factors; makes it possible to identify a variable with a factor.
+Return factors that are orthogonal
+```{r}
+res_efa_18 = EFA(sub_feat_lung_data[,-1], n_factors = 18, rotation = "varimax", type = "EFAtools")
+```
+
+Model averaging
+```{r eval=FALSE, include=FALSE}
+EFA_AV <- EFA_AVERAGE(sub_feat_lung_data[,-1], n_factors = 18, rotation = "varimax", averaging = "mean", show_progress = TRUE)
+```
+
+
+Compare two rotation techniques
+```{r eval=FALSE, include=FALSE}
+COMPARE(
+  EFA(sub_feat_lung_data[,-1], n_factors = 18, rotation = "varimax", type = "EFAtools")$rot_loadings,
+  EFA(sub_feat_lung_data[,-1], n_factors = 18, rotation = "promax", type = "EFAtools")$rot_loadings
+)
+```
+
+
+#### Direct Oblimin (DO)
+Factors are allowed to be correlated
+
+#### Factor loadings: factor-variable correlation
+Correlations between the variables and the factors
+Should be greater than 0.5
+```{r}
+?EFA
+```
+
+
+#### Factor matrix
+contains the factor loading of all the variables on all the factors extracted
+```{r}
+?EFA_AVERAGE
+```
+
+
+### Step 5. Model fit
+The difference between the reproduced and observed correlation should be small (< 0.05) ?
+Question: how to reproduce the degree of correlation ? Reproduced commonalities
+
+### Step 6. Interpretation
+
+# Classification with factors: target variable gender
+
+Diagram factor
+```{r}
+loads = res_efa_18$rot_loadings
+
+fa.diagram(loads[6:15,])
+```
+
